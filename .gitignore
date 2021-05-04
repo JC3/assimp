@@ -1,3 +1,9 @@
+/doc
+/BINARIES
+/jc3
+buildem*.bat
+deployem*.bat
+
 .idea
 build
 .project
