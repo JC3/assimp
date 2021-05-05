@@ -136,7 +136,9 @@ public:
         if (parse_result.status == pugi::status_ok) {
             return true;
         } else {
-            ASSIMP_LOG_DEBUG("Error while parse xml.");
+            ASSIMP_LOG_DEBUG((std::ostringstream() << "Error while parsing XML: "
+                               << parse_result.description()
+                               << " @ " << parse_result.offset).str());
             return false;
         }
     }
