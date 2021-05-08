@@ -45,6 +45,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/IOStreamBuffer.h>
 #include "TestIOStream.h"
 #include "UnitTestFileGenerator.h"
+#include <type_traits>
+
+// Require variable to be a null-terminated array of char-sized elements.
+#define AI_ASSERT_STRINGY_DATA(v) do { \
+    ASSERT_EQ(1, sizeof(std::remove_extent<decltype(v)>::type)) << "Fix me: test only works for char data."; \
+    ASSERT_EQ(0, (v)[sizeof(v) - 1]) << "Fix me: test assumes null-terminated data."; \
+    } while (0)
 
 class IOStreamBufferTest : public ::testing::Test {
     // empty
@@ -106,23 +113,23 @@ TEST_F( IOStreamBufferTest, open_close_Test ) {
     remove(fname);
 }
 
-TEST_F( IOStreamBufferTest, readlineTest ) {
-    
+TEST_F( IOStreamBufferTest, blockCountTest ) {
+
     const auto dataSize = sizeof(data);
     const auto dataCount = dataSize / sizeof(*data);
 
-    char fname[]={ "readlinetest.XXXXXX" };
+    char fname[]={ "blockcounttest.XXXXXX" };
     auto* fs = MakeTmpFile(fname);
     ASSERT_NE(nullptr, fs);
 
     auto written = std::fwrite( data, sizeof(*data), dataCount, fs );
-    EXPECT_NE( 0U, written );
+    ASSERT_EQ( dataCount, written );
 
-	auto flushResult = std::fflush(fs);
-	ASSERT_EQ(0, flushResult);
-	std::fclose(fs);
-	fs = std::fopen(fname, "r");
-	ASSERT_NE(nullptr, fs);
+    auto flushResult = std::fflush(fs);
+    ASSERT_EQ(0, flushResult);
+    std::fclose(fs);
+    fs = std::fopen(fname, "r");
+    ASSERT_NE(nullptr, fs);
 
     const auto tCacheSize = 26u;
 
@@ -136,11 +143,82 @@ TEST_F( IOStreamBufferTest, readlineTest ) {
         numBlocks++;
     }
     EXPECT_TRUE( myBuffer.open( &myStream ) );
+    EXPECT_EQ( 0, myBuffer.getFilePos() );
     EXPECT_EQ( numBlocks, myBuffer.getNumBlocks() );
     EXPECT_TRUE( myBuffer.close() );
 }
 
-TEST_F( IOStreamBufferTest, accessBlockIndexTest ) {
+TEST_F( IOStreamBufferTest, cacheReadDataLineTest ) {
+
+    AI_ASSERT_STRINGY_DATA(data);
+
+    // Exclude null terminator from data for this test.
+    constexpr auto dataSize = sizeof(data) - 1;
+    constexpr auto dataCount = dataSize;
+
+    // Choose one that's not in the data.
+    const char continuationToken = '$';
+
+    // There are no continuation tokens, CRs, LFs, or NULs in the data to complicate this test.
+    ASSERT_EQ(nullptr, memchr(data, (unsigned char)continuationToken, dataSize));
+    ASSERT_EQ(nullptr, memchr(data, (unsigned char)'\n', dataSize));
+    ASSERT_EQ(nullptr, memchr(data, (unsigned char)'\r', dataSize));
+    ASSERT_EQ(nullptr, memchr(data, (unsigned char)'\0', dataSize));
+
+    char fname[]={ "cacheReadDataLineTest.XXXXXX" };
+    auto* fs = MakeTmpFile(fname);
+    ASSERT_NE(nullptr, fs);
+
+    auto written = std::fwrite( data, 1, dataSize, fs );
+    ASSERT_EQ( dataSize, written );
+
+    auto flushResult = std::fflush(fs);
+    ASSERT_EQ(0, flushResult);
+    std::fclose(fs);
+
+    // Test with various combinations of cache sizes and read limits, relative
+    // to the file size. Sizes chosen to be less than, equal to, or greater
+    // than file size, plus some traditionally problematic extras (-2,-1,+1),
+    // and 0 and 1 to test extremes. UINT_MAX is list terminator.
+    ASSERT_GE(dataCount, (size_t)4) << "Fix me: Give me more data!";
+    const unsigned cacheSizes[] = { 0, 1, dataCount / 2, dataCount - 2, dataCount - 1, dataCount, dataCount + 1, dataCount * 2, UINT_MAX };
+    const unsigned readLimits[] = { 0, 1, dataCount / 2, dataCount - 2, dataCount - 1, dataCount, dataCount + 1, dataCount * 2, UINT_MAX };
+
+    for (int cIndex = 0; cacheSizes[cIndex] != UINT_MAX; ++ cIndex) {
+        for (int rIndex = 0; readLimits[rIndex] != UINT_MAX; ++ rIndex) {
+
+            fs = std::fopen(fname, "r");
+            ASSERT_NE(nullptr, fs);
+
+            const auto tCacheSize = cacheSizes[cIndex];
+            const auto tReadLimit = readLimits[rIndex];
+
+            // open should fail for invalid cache sizes and succeed otherwise.
+            const bool tExpectedOpen = (tCacheSize > 0);
+
+            // read should fail if not open or if line too long.
+            // note: >, not >=, as limit includes appended newline.
+            const bool tExpectedRead = (tExpectedOpen && (tReadLimit > dataSize));
+
+            IOStreamBuffer<char> myBuffer( tCacheSize );
+            ASSERT_EQ(tCacheSize, myBuffer.cacheSize() );
+
+            TestDefaultIOStream myStream( fs, fname );
+            ASSERT_EQ(myStream.FileSize(), dataSize);
+
+            std::vector<char> readBuffer;
+            ASSERT_EQ( tExpectedOpen, myBuffer.open( &myStream ) );
+            ASSERT_EQ( tExpectedRead, myBuffer.getNextDataLine( readBuffer, continuationToken, tReadLimit ) );
+            ASSERT_EQ( tExpectedOpen, myBuffer.close() ); // close should fail if open failed
+
+            ASSERT_LE( readBuffer.size(), tReadLimit ); // <- should remain true even on read failure
+            if ( tExpectedRead ) {
+                ASSERT_EQ( readBuffer.size(), dataCount + 1 ); // <- will be all data + a newline.
+                ASSERT_EQ( 0, memcmp(&(readBuffer[0]), data, dataSize) );
+                ASSERT_EQ( '\n', readBuffer[dataCount] );
+            }
+
+        }
+    }
 
 }
-

@@ -51,6 +51,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assimp/types.h>
 #include <assimp/IOStream.hpp>
 #include <assimp/ParsingUtils.h>
+#include <assimp/DefaultLogger.hpp>
 
 #include <vector>
 
@@ -63,8 +64,11 @@ namespace Assimp {
 template<class T>
 class IOStreamBuffer {
 public:
+    /// @brief Default cache and buffer size.
+    static constexpr size_t DefaultBufferSize = 4096 * 4096;
+
     /// @brief  The class constructor.
-    IOStreamBuffer( size_t cache = 4096 * 4096 );
+    IOStreamBuffer( size_t cache = DefaultBufferSize );
 
     /// @brief  The class destructor.
     ~IOStreamBuffer();
@@ -103,9 +107,12 @@ public:
     size_t getFilePos() const;
 
     /// @brief  Will read the next line.
-    /// @param  buffer      The buffer for the next line.
-    /// @return true if successful.
-    bool getNextDataLine( std::vector<T> &buffer, T continuationToken );
+    /// @param  buffer      The buffer for the next line. Will be resized, and existing
+    ///                     capacity will be reused if possible.
+    /// @param  maxElements Max number of elements to read (including newline) before
+    ///                     considering the line to be too long for the file format.
+    /// @return true if successful. False on EOF, read error, or if line length exceeded.
+    bool getNextDataLine( std::vector<T> &buffer, T continuationToken, size_t maxElements = DefaultBufferSize );
 
     /// @brief  Will read the next line ascii or binary end line char.
     /// @param  buffer      The buffer for the next line.
@@ -124,8 +131,9 @@ private:
     size_t m_numBlocks;
     size_t m_blockIdx;
     std::vector<T> m_cache;
-    size_t m_cachePos;
-    size_t m_filePos;
+    size_t m_cachePos;       ///< Current position in cache.
+    size_t m_fileCachePos;   ///< File position of start of cache (will also be 0 if no cache read yet).
+    size_t m_filePos;        ///< File position to read next (i.e. start of next cache).
 };
 
 template<class T>
@@ -137,6 +145,7 @@ IOStreamBuffer<T>::IOStreamBuffer( size_t cache )
 , m_numBlocks( 0 )
 , m_blockIdx( 0 )
 , m_cachePos( 0 )
+, m_fileCachePos( 0 )
 , m_filePos( 0 ) {
     m_cache.resize( cache );
     std::fill( m_cache.begin(), m_cache.end(), '\n' );
@@ -158,6 +167,12 @@ bool IOStreamBuffer<T>::open( IOStream *stream ) {
 
     //  Invalid stream pointer
     if ( nullptr == stream ) {
+        return false;
+    }
+
+    //  Invalid cache size (otherwise division below may raise an fp exception)
+    if ( m_cacheSize <= 0 ) {
+        ASSIMP_LOG_ERROR("IOStreamBuffer: Invalid cache size set.");
         return false;
     }
 
@@ -186,12 +201,13 @@ bool IOStreamBuffer<T>::close() {
     }
 
     // init counters and state vars
-    m_stream    = nullptr;
-    m_filesize  = 0;
-    m_numBlocks = 0;
-    m_blockIdx  = 0;
-    m_cachePos  = 0;
-    m_filePos   = 0;
+    m_stream       = nullptr;
+    m_filesize     = 0;
+    m_numBlocks    = 0;
+    m_blockIdx     = 0;
+    m_cachePos     = 0;
+    m_fileCachePos = 0;
+    m_filePos      = 0;
 
     return true;
 }
@@ -211,7 +227,11 @@ size_t IOStreamBuffer<T>::cacheSize() const {
 template<class T>
 AI_FORCE_INLINE
 bool IOStreamBuffer<T>::readNextBlock() {
+    if ( !m_stream ) {
+        return false;
+    }
     m_stream->Seek( m_filePos, aiOrigin_SET );
+    m_fileCachePos = m_filePos; // assume Seek succeeded (todo [jc3])
     size_t readLen = m_stream->Read( &m_cache[ 0 ], sizeof( T ), m_cacheSize );
     if ( readLen == 0 ) {
         return false;
@@ -241,20 +261,31 @@ size_t IOStreamBuffer<T>::getCurrentBlockIndex() const {
 template<class T>
 AI_FORCE_INLINE
 size_t IOStreamBuffer<T>::getFilePos() const {
-    return m_filePos;
+    // Computed position will exceed actual file size after EOF is reached. Turns
+    // out it's very hard to both fix that *and* guarantee we don't break anything,
+    // at least with the current implementation. Easiest fix is to clamp it here. [jc3]
+    return std::min(m_fileCachePos + m_cachePos, size());
 }
 
 template<class T>
 AI_FORCE_INLINE
-bool IOStreamBuffer<T>::getNextDataLine( std::vector<T> &buffer, T continuationToken ) {
-    buffer.resize( m_cacheSize );
+bool IOStreamBuffer<T>::getNextDataLine( std::vector<T> &buffer, T continuationToken, size_t maxElements ) {
+
+    if ( maxElements <= 0 ) {
+        return false;
+    }
+
+    buffer.reserve( std::min(m_cacheSize, maxElements) );
+    buffer.clear();
+
     if ( m_cachePos >= m_cacheSize || 0 == m_filePos ) {
         if ( !readNextBlock() ) {
             return false;
         }
     }
 
-    size_t i = 0;
+    -- maxElements; // hold a spot for the newline
+
     for( ;; ) {
         if ( continuationToken == m_cache[ m_cachePos ] && IsLineEnd( m_cache[ m_cachePos + 1 ] ) ) {
             ++m_cachePos;
@@ -266,10 +297,17 @@ bool IOStreamBuffer<T>::getNextDataLine( std::vector<T> &buffer, T continuationT
             break;
         }
 
-        buffer[ i ] = m_cache[ m_cachePos ];
+        if (buffer.size() >= maxElements) {
+            // note: IOStream does not seem to provide a way to distinguish eof
+            // from error conditions, so we won't here, either.  -- jc3
+            ASSIMP_LOG_ERROR("Line too long; length exceeds limit.");
+            return false;
+        }
+
+        buffer.push_back(m_cache[ m_cachePos ]);
         ++m_cachePos;
-        ++i;
-        if (m_cachePos >= size()) {
+
+        if ( m_fileCachePos + m_cachePos >= size() ) {
             break;
         }
         if ( m_cachePos >= m_cacheSize ) {
@@ -277,9 +315,10 @@ bool IOStreamBuffer<T>::getNextDataLine( std::vector<T> &buffer, T continuationT
                 return false;
             }
         }
+
     }
     
-    buffer[ i ] = '\n';
+    buffer.push_back('\n');
     ++m_cachePos;
 
     return true;
