@@ -116,6 +116,7 @@ void ObjFileParser::parseFile(IOStreamBuffer<char> &streamBuffer) {
     const unsigned int bytesToProcess = static_cast<unsigned int>(streamBuffer.size());
     const unsigned int progressTotal = bytesToProcess;
     unsigned int processed = 0;
+    bool probablyFoundMaterials = false, foundFaces = false;
     size_t lastFilePos(0);
 
     std::vector<char> buffer;
@@ -164,7 +165,8 @@ void ObjFileParser::parseFile(IOStreamBuffer<char> &streamBuffer) {
         case 'p': // Parse a face, line or point statement
         case 'l':
         case 'f': {
-            getFace(*m_DataIt == 'f' ? aiPrimitiveType_POLYGON : (*m_DataIt == 'l' ? aiPrimitiveType_LINE : aiPrimitiveType_POINT));
+            bool got = getFace(*m_DataIt == 'f' ? aiPrimitiveType_POLYGON : (*m_DataIt == 'l' ? aiPrimitiveType_LINE : aiPrimitiveType_POINT));
+            foundFaces |= got;
         } break;
 
         case '#': // Parse a comment
@@ -200,7 +202,7 @@ void ObjFileParser::parseFile(IOStreamBuffer<char> &streamBuffer) {
             if (name == "mg")
                 getGroupNumberAndResolution();
             else if (name == "mtllib")
-                getMaterialLib();
+                probablyFoundMaterials = getMaterialLib() || probablyFoundMaterials;
             else
                 goto pf_skip_line;
         } break;
@@ -226,6 +228,13 @@ void ObjFileParser::parseFile(IOStreamBuffer<char> &streamBuffer) {
         } break;
         }
     }
+    // make sure we actually parsed something interesting; be pretty forgiving though.
+    if ( !probablyFoundMaterials &&
+         !foundFaces &&
+         m_pModel->m_Vertices.empty() &&
+         m_pModel->m_Normals.empty() &&
+         m_pModel->m_TextureCoord.empty() )
+        throw DeadlyImportError("OBJ: No data found in file.");
 }
 
 void ObjFileParser::copyNextWord(char *pBuffer, size_t length) {
@@ -406,10 +415,10 @@ void ObjFileParser::getVector2(std::vector<aiVector2D> &point2d_array) {
 
 static const std::string DefaultObjName = "defaultobject";
 
-void ObjFileParser::getFace(aiPrimitiveType type) {
+bool ObjFileParser::getFace(aiPrimitiveType type) {
     m_DataIt = getNextToken<DataArrayIt>(m_DataIt, m_DataItEnd);
     if (m_DataIt == m_DataItEnd || *m_DataIt == '\0') {
-        return;
+        return false;
     }
 
     ObjFile::Face *face = new ObjFile::Face(type);
@@ -490,7 +499,7 @@ void ObjFileParser::getFace(aiPrimitiveType type) {
         // skip line and clean up
         m_DataIt = skipLine<DataArrayIt>(m_DataIt, m_DataItEnd, m_uiLine);
         delete face;
-        return;
+        return false;
     }
 
     // Set active material, if one set
@@ -519,6 +528,8 @@ void ObjFileParser::getFace(aiPrimitiveType type) {
     }
     // Skip the rest of the line
     m_DataIt = skipLine<DataArrayIt>(m_DataIt, m_DataItEnd, m_uiLine);
+    // If we made it this far, we got a face
+    return true;
 }
 
 void ObjFileParser::getMaterialDesc() {
@@ -585,11 +596,11 @@ void ObjFileParser::getComment() {
 
 // -------------------------------------------------------------------
 //  Get material library from file.
-void ObjFileParser::getMaterialLib() {
+bool ObjFileParser::getMaterialLib() {
     // Translate tuple
     m_DataIt = getNextToken<DataArrayIt>(m_DataIt, m_DataItEnd);
     if (m_DataIt == m_DataItEnd) {
-        return;
+        return false;
     }
 
     char *pStart = &(*m_DataIt);
@@ -604,7 +615,7 @@ void ObjFileParser::getMaterialLib() {
     // Check if directive is valid.
     if (0 == strMatName.length()) {
         ASSIMP_LOG_WARN("OBJ: no name for material library specified.");
-        return;
+        return false;
     }
 
     if (m_pIO->StackSize() > 0) {
@@ -627,7 +638,7 @@ void ObjFileParser::getMaterialLib() {
         if (!pFile) {
             ASSIMP_LOG_ERROR("OBJ: Unable to locate fallback material file " + strMatFallbackName);
             m_DataIt = skipLine<DataArrayIt>(m_DataIt, m_DataItEnd, m_uiLine);
-            return;
+            return false;
         }
     }
 
@@ -641,6 +652,10 @@ void ObjFileParser::getMaterialLib() {
 
     // Importing the material library
     ObjFileMtlImporter mtlImporter(buffer, strMatName, m_pModel.get());
+
+    // Non-empty file doesn't necessarily *mean* we loaded something, but it's
+    // close enough, we'll still count it.
+    return !buffer.empty();
 }
 
 // -------------------------------------------------------------------

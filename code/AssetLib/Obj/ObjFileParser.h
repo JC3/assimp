@@ -107,14 +107,14 @@ protected:
     void getTwoVectors3(std::vector<aiVector3D> &point3d_array_a, std::vector<aiVector3D> &point3d_array_b);
     /// Stores the following 3d vector.
     void getVector2(std::vector<aiVector2D> &point2d_array);
-    /// Stores the following face.
-    void getFace(aiPrimitiveType type);
+    /// Stores the following face. Returns true if a face was stored, false if not.
+    bool getFace(aiPrimitiveType type);
     /// Reads the material description.
     void getMaterialDesc();
     /// Gets a comment.
     void getComment();
-    /// Gets a a material library.
-    void getMaterialLib();
+    /// Gets a a material library. Returns true if something was loaded, false if not.
+    bool getMaterialLib();
     /// Creates a new material.
     void getNewMaterial();
     /// Gets the group name from file.
