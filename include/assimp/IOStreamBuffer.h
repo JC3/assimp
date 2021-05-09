@@ -239,7 +239,7 @@ bool IOStreamBuffer<T>::readNextBlock() {
     if ( readLen < m_cacheSize ) {
         m_cacheSize = readLen;
     }
-    m_filePos += m_cacheSize;
+    m_filePos = m_stream->Tell();
     m_cachePos = 0;
     m_blockIdx++;
 

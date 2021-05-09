@@ -125,18 +125,10 @@ TEST_F( IOStreamBufferTest, open_close_Test ) {
     remove(fname);
 }
 
-TEST_F( IOStreamBufferTest, blockCountTest ) {
-
-    const auto dataSize = sizeof(gTestData);
-    //const auto dataCount = dataSize / sizeof(*gTestData);
-
-    char fname[]={ "blockcounttest.XXXXXX" };
-    iosbt_MakeTestFile(gTestData, dataSize, fname);
+static void iosbt_RunBlockCountTest (const char *fname, size_t tCacheSize) {
 
     auto* fs = std::fopen(fname, "r");
     ASSERT_NE(nullptr, fs);
-
-    const auto tCacheSize = 26u;
 
     IOStreamBuffer<char> myBuffer( tCacheSize );
     EXPECT_EQ(tCacheSize, myBuffer.cacheSize() );
@@ -147,12 +139,61 @@ TEST_F( IOStreamBufferTest, blockCountTest ) {
     if ( size % myBuffer.cacheSize() > 0 ) {
         numBlocks++;
     }
-    EXPECT_TRUE( myBuffer.open( &myStream ) );
+    ASSERT_TRUE( myBuffer.open( &myStream ) );
     EXPECT_EQ( 0, myBuffer.getFilePos() );
     EXPECT_EQ( numBlocks, myBuffer.getNumBlocks() );
+    unsigned numActualBlocks = 0;
+    while (myBuffer.readNextBlock()) {
+        ++ numActualBlocks;
+        ASSERT_LE( numActualBlocks, 1000u ) << "readNextBlock appears stuck in a loop.";
+    }
+#if 0 // For CRLF input files, there's no easy way to know, so we'll have to just live with it.
+    EXPECT_EQ( numBlocks, numActualBlocks );
+#else
+    if ( numBlocks != numActualBlocks ) {
+        // If you're here investigating: Don't worry, this is just informative. It's not
+        // a cause for alarm.
+        ASSIMP_LOG_DEBUG_F( "Note: Block count off (cache=", tCacheSize, ", filesize=",
+                            size, "): calculated=", numBlocks, ", actual=", numActualBlocks );
+    }
+#endif
     EXPECT_TRUE( myBuffer.close() );
+
 }
 
+TEST_F( IOStreamBufferTest, blockCountTest ) {
+
+    // This is equivalent to the original test; it's just been moved to a util function.
+    char fname[]={ "blockcounttest.XXXXXX" };   
+    iosbt_MakeTestFile(gTestData, sizeof(gTestData), fname);
+    iosbt_RunBlockCountTest(fname, 26);
+
+}
+
+TEST_F( IOStreamBufferTest, blockCountTest_CRLF ) {
+
+    const char myData[] = {
+        "first_6789ABCDEF\r\n"
+        "second_789ABCDEF\r\n"
+        "third_6789ABCDEF\r\n"
+        "fourth_789ABCDEF\r\n"
+        "fifth_6789ABCDEF\r\n"
+    };
+    const size_t myDataLength = (size_t)strlen(myData);
+
+    char fname[]={ "blockcounttest_crlf.XXXXXX" };
+    iosbt_MakeTestFile(myData, myDataLength, fname, true);
+    iosbt_RunBlockCountTest(fname, 1);
+    iosbt_RunBlockCountTest(fname, 16);
+    iosbt_RunBlockCountTest(fname, 17);
+    iosbt_RunBlockCountTest(fname, 18);
+    iosbt_RunBlockCountTest(fname, 26);
+    iosbt_RunBlockCountTest(fname, myDataLength / 2);
+    iosbt_RunBlockCountTest(fname, myDataLength - 1);
+    iosbt_RunBlockCountTest(fname, myDataLength);
+    iosbt_RunBlockCountTest(fname, myDataLength + 1);
+
+}
 
 namespace Assimp {
 struct ReadParameterSet {
@@ -264,7 +305,7 @@ TEST_F( IOStreamBufferTest, readDataLineTest_BufferBehavior ) {
 
 }
 
-TEST_F( IOStreamBufferTest, readDataLineTest_Vanilla ) {
+TEST_F( IOStreamBufferTest, readDataLineTest_Ideal ) {
 
     const char myData[] = {
         "first_6789ABCDEF\n"
@@ -365,5 +406,78 @@ TEST_F( IOStreamBufferTest, readDataLineTest_AllEmptyLines ) {
                                     { {                1, lineCount, myDataLength },
                                       {                2, lineCount, myDataLength },
                                       { myDataLength * 2, lineCount, myDataLength } });
+
+}
+
+TEST_F( IOStreamBufferTest, readDataLineTest_CRLF_FilePosition ) {
+
+    const char myData[] = {
+        "first_6789ABCDEF\r\n"
+        "second_789ABCDEF\r\n"
+        "third_6789ABCDEF\r\n"
+        "fourth_789ABCDEF\r\n"
+        "fifth_6789ABCDEF\r\n"
+    };
+    const unsigned lineLength = 16; // not including line endings
+    const unsigned lineCount = 5;
+    const unsigned myDataLen = (unsigned)strlen(myData);
+
+    char fname[] = { "readdatalinetest_crlf.XXXXXX" };
+    iosbt_MakeTestFile(myData, myDataLen, fname, true);
+
+    // Let's do this test in challenge mode with a variety of cache sizes:
+    std::vector<size_t> cacheSizes = {
+        1,                      // always a good test
+        15, 16, 17, 18, 19,     // (lineLength - 1) thru (bytes per line + 1)
+        myDataLen - lineCount,  // data length if CRLFs changed to LFs
+        myDataLen,              // data length
+        myDataLen - 1,          // because why not
+        myDataLen + 1,          // same
+        IOStreamBuffer<char>::DefaultBufferSize  // default value
+    };
+
+    for (size_t cacheSize : cacheSizes) {
+
+        auto* fs = std::fopen(fname, "r");
+        ASSERT_NE(nullptr, fs);
+        TestDefaultIOStream myStream( fs, fname );
+        ASSERT_EQ( myStream.FileSize(), myDataLen );
+
+        IOStreamBuffer<char> myBuffer( cacheSize );
+        ASSERT_EQ( myBuffer.cacheSize(), cacheSize );
+
+        std::vector<char> readBuffer;
+        ASSERT_TRUE( myBuffer.open( &myStream ) );
+
+        bool gotLine;
+        unsigned linesRead = 0;
+
+        do {
+            gotLine = myBuffer.getNextDataLine(readBuffer, '$');
+            if ( linesRead < lineCount ) {
+                ASSERT_TRUE( gotLine ) << "failed to read a line when there were still lines left.";
+                ASSERT_EQ( lineLength + 1, readBuffer.size() ) << "# elements read doesn't match expected line length.";
+                ASSERT_EQ( '\n', readBuffer.back() ) << "line isn't terminated with an LF";
+                ASSERT_EQ( 0, strchr(&(readBuffer[0]), '\r') ) << "a CR was read as part of the data";
+                ASSERT_EQ( 1, std::count(readBuffer.begin(), readBuffer.end(), '\n') ) << "a LF was read as part of the data";
+            } else {
+                EXPECT_FALSE( gotLine ) << "read a line when there shouldn't have been more lines.";
+                if ( gotLine ) { // if we *did* get an unexpected line; check it anyways:
+                    EXPECT_FALSE( readBuffer.empty() );
+                    if ( !readBuffer.empty() ) {
+                        ASSERT_EQ( lineLength + 1, readBuffer.size() );
+                        ASSERT_EQ( '\n', readBuffer.back() );
+                        ASSERT_EQ( 0, strchr(&(readBuffer[0]), '\r') );
+                        ASSERT_EQ( 1, std::count(readBuffer.begin(), readBuffer.end(), '\n') );
+                    }
+                }
+            }
+            ++ linesRead;
+            ASSERT_LE( linesRead, MAX_LINES_BEFORE_ABORT ) << "getNextDataLine seems to be stuck returning true";
+        } while ( gotLine );
+
+        ASSERT_TRUE( myBuffer.close() );
+
+    }
 
 }
