@@ -47,7 +47,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #if defined(_MSC_VER)
 #include <io.h>
 #define TMP_PATH "./"
-inline FILE* MakeTmpFile(char* tmplate)
+inline FILE* MakeTmpFile(char* tmplate, bool binaryMode = false)
 {
     auto pathtemplate = _mktemp(tmplate);
     EXPECT_NE(pathtemplate, nullptr);
@@ -55,13 +55,13 @@ inline FILE* MakeTmpFile(char* tmplate)
     {
         return nullptr;
     }
-    auto* fs = std::fopen(pathtemplate, "w+");
+    auto* fs = std::fopen(pathtemplate, binaryMode ? "w+b" : "w+");
     EXPECT_NE(fs, nullptr);
     return fs;
 }
 #elif defined(__GNUC__) || defined(__clang__)
 #define TMP_PATH "/tmp/"
-inline FILE* MakeTmpFile(char* tmplate)
+inline FILE* MakeTmpFile(char* tmplate, bool binaryMode = false)
 {
     auto fd = mkstemp(tmplate);
     EXPECT_NE(-1, fd);
@@ -69,7 +69,7 @@ inline FILE* MakeTmpFile(char* tmplate)
     {
         return nullptr;
     }
-    auto fs = fdopen(fd, "w+");
+    auto fs = fdopen(fd, binaryMode ? "w+b" : "w+");
     EXPECT_NE(nullptr, fs);
     return fs;
 }
