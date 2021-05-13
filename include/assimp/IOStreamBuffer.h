@@ -286,14 +286,32 @@ bool IOStreamBuffer<T>::getNextDataLine( std::vector<T> &buffer, T continuationT
 
     -- maxElements; // hold a spot for the newline
 
+    T previousToken = 0;
     for( ;; ) {
+        // [jc3] Note: Do *not* read ahead/behind in the cache, since we may be at a block boundary.
+        // Instead, for stateful decisions, track previous values instead. Also, this is true:
+        ai_assert((previousToken != 0) == (buffer.empty() == false)); // if previousToken, then buffer has data.
+
         if ( continuationToken == m_cache[ m_cachePos ] && IsLineEnd( m_cache[ m_cachePos + 1 ] ) ) {
             ++m_cachePos;
             while ( m_cache[ m_cachePos ] != '\n' ) {
                 ++m_cachePos;
             }
             ++m_cachePos;
-        } else if ( IsLineEnd ( m_cache[ m_cachePos ] ) ) {
+        }
+
+        // [jc3] So, this logic might be *technically* weird, but my goal is to fix handling of
+        // untranslated CRLF files *without* modifying the pre-fix behavior, under the assumption
+        // that things like treating '\f' as a line break, and supporting old Mac CR endings, are
+        // in here for a reason. Previous logic was just `if (IsLineEnd(...)) break;`.
+        if ( previousToken == '\r') {
+            buffer.pop_back();
+            if ( m_cache[ m_cachePos ] == '\n' ) {
+                ++ m_cachePos;
+            }
+            break;
+        } else if ( m_cache[ m_cachePos ] != '\r' && IsLineEnd( m_cache[ m_cachePos ])) {
+            ++ m_cachePos;
             break;
         }
 
@@ -304,7 +322,7 @@ bool IOStreamBuffer<T>::getNextDataLine( std::vector<T> &buffer, T continuationT
             return false;
         }
 
-        buffer.push_back(m_cache[ m_cachePos ]);
+        buffer.push_back(previousToken = m_cache[ m_cachePos ]);
         ++m_cachePos;
 
         if ( m_fileCachePos + m_cachePos >= size() ) {
@@ -319,7 +337,6 @@ bool IOStreamBuffer<T>::getNextDataLine( std::vector<T> &buffer, T continuationT
     }
     
     buffer.push_back('\n');
-    ++m_cachePos;
 
     return true;
 }
