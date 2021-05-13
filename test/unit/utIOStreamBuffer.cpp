@@ -209,11 +209,19 @@ template <typename element_t>
 static void iosbt_RunReadDataLineTest (const void *content, size_t contentBytes,
                                        element_t continuationToken,
                                        const std::vector<unsigned> &cacheSizes,
-                                       const std::vector<ReadParameterSet> &readParameterSets)
+                                       const std::vector<ReadParameterSet> &readParameterSets,
+                                       const void *expectedContent = nullptr, size_t expectedContentBytes = 0)
 {
+
+    if (!expectedContent) {
+        expectedContent = content;
+        expectedContentBytes = contentBytes;
+    }
 
     ASSERT_NE(nullptr, content);
     ASSERT_GE(contentBytes, (size_t)0);
+    ASSERT_NE(nullptr, expectedContent);
+    ASSERT_GE(expectedContentBytes, (size_t)0);
     ASSERT_FALSE(cacheSizes.empty());
     ASSERT_FALSE(readParameterSets.empty());
 
@@ -260,15 +268,15 @@ static void iosbt_RunReadDataLineTest (const void *content, size_t contentBytes,
             ASSERT_EQ( tExpectedElements, allDataRead.size() );
             if ( tExpectedElements ) {
                 size_t totalBytesReceived = allDataRead.size() * sizeof(element_t);
-                if (totalBytesReceived > contentBytes) {
+                if (totalBytesReceived > expectedContentBytes) {
                     // There is exactly one reason for us to have seen more bytes than
                     // the input file had, which is that the content didn't end in a
                     // newline and IOStreamBuffer added one for us. Confirm that here.
-                    ASSERT_EQ( totalBytesReceived, contentBytes + sizeof(element_t) );
+                    ASSERT_EQ( totalBytesReceived, expectedContentBytes + sizeof(element_t) );
                     ASSERT_EQ( '\n', allDataRead.back() );
                 }
-                size_t bytesToCompare = std::min( totalBytesReceived, contentBytes );
-                ASSERT_EQ( 0, memcmp(content, &(allDataRead[0]), bytesToCompare) );
+                size_t bytesToCompare = std::min( totalBytesReceived, expectedContentBytes );
+                EXPECT_EQ( 0, memcmp(expectedContent, &(allDataRead[0]), bytesToCompare) );
             }
 
         }
@@ -409,7 +417,7 @@ TEST_F( IOStreamBufferTest, readDataLineTest_AllEmptyLines ) {
 
 }
 
-TEST_F( IOStreamBufferTest, readDataLineTest_CRLF_FilePosition ) {
+static void iosbt_RunCRLFTest (const char *fopenmode) {
 
     const char myData[] = {
         "first_6789ABCDEF\r\n"
@@ -438,7 +446,7 @@ TEST_F( IOStreamBufferTest, readDataLineTest_CRLF_FilePosition ) {
 
     for (size_t cacheSize : cacheSizes) {
 
-        auto* fs = std::fopen(fname, "r");
+        auto* fs = std::fopen(fname, fopenmode);
         ASSERT_NE(nullptr, fs);
         TestDefaultIOStream myStream( fs, fname );
         ASSERT_EQ( myStream.FileSize(), myDataLen );
@@ -453,23 +461,24 @@ TEST_F( IOStreamBufferTest, readDataLineTest_CRLF_FilePosition ) {
         unsigned linesRead = 0;
 
         do {
-            gotLine = myBuffer.getNextDataLine(readBuffer, '$');
+            gotLine = myBuffer.getNextDataLine(readBuffer, 0);
             if ( linesRead < lineCount ) {
                 ASSERT_TRUE( gotLine ) << "failed to read a line when there were still lines left.";
-                ASSERT_EQ( lineLength + 1, readBuffer.size() ) << "# elements read doesn't match expected line length.";
-                ASSERT_EQ( '\n', readBuffer.back() ) << "line isn't terminated with an LF";
-                ASSERT_EQ( 0, strchr(&(readBuffer[0]), '\r') ) << "a CR was read as part of the data";
-                ASSERT_EQ( 1, std::count(readBuffer.begin(), readBuffer.end(), '\n') ) << "a LF was read as part of the data";
+                EXPECT_EQ( lineLength + 1, readBuffer.size() ) << "# elements read doesn't match expected line length.";
+                EXPECT_EQ( '\n', readBuffer.back() ) << "line isn't terminated with an LF";
+                EXPECT_EQ( 0, strchr(&(readBuffer[0]), '\r') ) << "a CR was read as part of the data";
+                EXPECT_EQ( 1, std::count(readBuffer.begin(), readBuffer.end(), '\n') ) << "a LF was read as part of the data";
             } else {
                 EXPECT_FALSE( gotLine ) << "read a line when there shouldn't have been more lines.";
                 if ( gotLine ) { // if we *did* get an unexpected line; check it anyways:
                     EXPECT_FALSE( readBuffer.empty() );
                     if ( !readBuffer.empty() ) {
-                        ASSERT_EQ( lineLength + 1, readBuffer.size() );
-                        ASSERT_EQ( '\n', readBuffer.back() );
-                        ASSERT_EQ( 0, strchr(&(readBuffer[0]), '\r') );
-                        ASSERT_EQ( 1, std::count(readBuffer.begin(), readBuffer.end(), '\n') );
+                        EXPECT_EQ( lineLength + 1, readBuffer.size() );
+                        EXPECT_EQ( '\n', readBuffer.back() );
+                        EXPECT_EQ( 0, strchr(&(readBuffer[0]), '\r') );
+                        EXPECT_EQ( 1, std::count(readBuffer.begin(), readBuffer.end(), '\n') );
                     }
+                    FAIL();
                 }
             }
             ++ linesRead;
@@ -479,5 +488,20 @@ TEST_F( IOStreamBufferTest, readDataLineTest_CRLF_FilePosition ) {
         ASSERT_TRUE( myBuffer.close() );
 
     }
+
+}
+
+// On POSIX systems this will be identical to the _BinaryMode test below.
+// On Windows this will change CRLFs to LFs before IOStreamBuffer sees the data.
+TEST_F( IOStreamBufferTest, readDataLineTest_CRLF_FilePosition ) {
+
+    iosbt_RunCRLFTest("r");
+
+}
+
+// On both POSIX and Windows systems, this will preserve CRLFs on read.
+TEST_F( IOStreamBufferTest, readDataLineTest_CRLF_FilePosition_BinaryMode ) {
+
+    iosbt_RunCRLFTest("rb");
 
 }
