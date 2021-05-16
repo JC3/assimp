@@ -278,61 +278,104 @@ bool IOStreamBuffer<T>::getNextDataLine( std::vector<T> &buffer, T continuationT
     buffer.reserve( std::min(m_cacheSize, maxElements) );
     buffer.clear();
 
+    // [jc3] Even though we do this at the start of the loop below, we still have to do it here,
+    // because the logic below will get stuck returning true on EOF. The only way to fix that is
+    // to check for EOF *after* calling readNextBlock(), which can't readily be done for various
+    // reasons related to inability of IO system to distinguish between an error and an eof.
+    // Easier to just do this here.
     if ( m_cachePos >= m_cacheSize || 0 == m_filePos ) {
         if ( !readNextBlock() ) {
             return false;
         }
     }
+    ai_assert( m_stream != nullptr ); // Otherwise readNextBlock() would have failed.
 
     -- maxElements; // hold a spot for the newline
 
-    T previousToken = 0;
+    T previousToken = 0, currentToken = 0;
     for( ;; ) {
-        // [jc3] Note: Do *not* read ahead/behind in the cache, since we may be at a block boundary.
-        // Instead, for stateful decisions, track previous values instead. Also, this is true:
-        ai_assert((previousToken != 0) == (buffer.empty() == false)); // if previousToken, then buffer has data.
 
-        if ( continuationToken == m_cache[ m_cachePos ] && IsLineEnd( m_cache[ m_cachePos + 1 ] ) ) {
-            ++m_cachePos;
-            while ( m_cache[ m_cachePos ] != '\n' ) {
-                ++m_cachePos;
-            }
-            ++m_cachePos;
+        // [jc3] Note: Do *not* read ahead/behind in the cache, since we may be at a block boundary.
+        // Instead, for stateful decisions, track previous values instead.
+
+        previousToken = currentToken;
+        if ( m_fileCachePos + m_cachePos >= size() ) {
+            currentToken = 0; // We're going to process EOF as a character, in case file ends with a \r.
+        } else if ( m_cachePos >= m_cacheSize && !readNextBlock() ) {
+            return false;
+        } else {
+            currentToken = m_cache[ m_cachePos ];
+            // Do not increment cachePos here; we may not want to consume this token yet.
         }
+
+#ifndef NDEBUG
+        auto debugCachePos = m_cachePos; // we'll need this below.
+#endif
 
         // [jc3] So, this logic might be *technically* weird, but my goal is to fix handling of
         // untranslated CRLF files *without* modifying the pre-fix behavior, under the assumption
         // that things like treating '\f' as a line break, and supporting old Mac CR endings, are
         // in here for a reason. Previous logic was just `if (IsLineEnd(...)) break;`.
+        bool eol = false;
         if ( previousToken == '\r') {
+            ai_assert( !buffer.empty() );
+            ai_assert( buffer.back() == '\r' );
             buffer.pop_back();
-            if ( m_cache[ m_cachePos ] == '\n' ) {
+            if ( currentToken == '\n' ) {
                 ++ m_cachePos;
-            }
-            break;
-        } else if ( m_cache[ m_cachePos ] != '\r' && IsLineEnd( m_cache[ m_cachePos ])) {
+            } // else: leave it for next time; only CRLF is special here.
+            eol = true;
+        } else if ( currentToken == 0 && buffer.empty() ) {
+            // [jc3] This means we hit EOF immediately after the end of a previous line, which doesn't
+            // really count as a line. There's a slight "quirk" in that if a file ends in multiple
+            // lines that consist only of a continuation character, that final empty line won't be
+            // returned but I mean... who cares...
+            return false;
+        } else if ( currentToken != '\r' && IsLineEnd( currentToken ) ) {
             ++ m_cachePos;
-            break;
+            eol = true;
         }
 
+        // [jc3] We'll handle continuations here, now, then. Rather than the previous logic that
+        // looked in the cache, we'll just check to see if the last non-line-ending we read was
+        // a continuation token. Since it might not be in previousToken (in the case of a CRLF
+        // encounter, previousToken will be the CR), we'll just check the end of the buffer.
+        if (eol) {
+            // The options here are either a) process continuation, or b) return the line.
+            if (!buffer.empty() && buffer.back() == continuationToken) {
+                buffer.pop_back(); // remove the continuation token
+                // We have to handle the continuation token -> EOF edge case specially here. If
+                // we just "continue", it won't crash, but if the last line of the file ends with
+                // multiple continuation tokens in a row, it'll strip them all off when it should
+                // only be stripping off the last one. It'll probably never happen, but...
+                if ( currentToken == 0 ) {
+                    break;
+                }
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        // [jc3] If we get here then m_cachePos has *not* been incremented (it's only incremented
+        // by code paths that set eol, which never get here), and so currentToken is still the
+        // current token. Also, unless it's a \r, it won't be a line/file ending.
+#ifndef NDEBUG
+        ai_assert( m_cachePos == debugCachePos );
+        ai_assert( m_cachePos < m_cacheSize );
+        ai_assert( currentToken == m_cache[ m_cachePos ]);
+        ai_assert( currentToken == '\r' || !IsLineEnd( currentToken ));
+#endif
+
         if (buffer.size() >= maxElements) {
-            // note: IOStream does not seem to provide a way to distinguish eof
-            // from error conditions, so we won't here, either.  -- jc3
+            // Note: IOStream does not seem to provide a way to distinguish eof
+            // from error conditions, so we won't here, either.
             ASSIMP_LOG_ERROR("Line too long; length exceeds limit.");
             return false;
         }
 
-        buffer.push_back(previousToken = m_cache[ m_cachePos ]);
-        ++m_cachePos;
-
-        if ( m_fileCachePos + m_cachePos >= size() ) {
-            break;
-        }
-        if ( m_cachePos >= m_cacheSize ) {
-            if ( !readNextBlock() ) {
-                return false;
-            }
-        }
+        buffer.push_back(currentToken);
+        ++ m_cachePos;
 
     }
     

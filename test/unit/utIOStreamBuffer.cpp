@@ -241,6 +241,8 @@ static void iosbt_RunReadDataLineTest (const void *content, size_t contentBytes,
             const auto tExpectedElements = tExpectedOpen ? tReadParams.elementsExpected : 0;
             const auto tReadLimit = tReadParams.readLimit;
 
+            //ASSIMP_LOG_VERBOSE_DEBUG_F("cache=", tCacheSize, " limit=", tReadLimit, " xlines=", tReadParams.linesExpected, " xelems=", tReadParams.elementsExpected);
+
             IOStreamBuffer<element_t> myBuffer( tCacheSize );
             ASSERT_EQ( tCacheSize, myBuffer.cacheSize() );
             TestDefaultIOStream myStream( fs, fname );
@@ -264,8 +266,8 @@ static void iosbt_RunReadDataLineTest (const void *content, size_t contentBytes,
             } while ( gotLine );
             ASSERT_EQ( tExpectedOpen, myBuffer.close() ); // close should fail if open failed
 
-            ASSERT_EQ( tExpectedLines, linesRead );
-            ASSERT_EQ( tExpectedElements, allDataRead.size() );
+            EXPECT_EQ( tExpectedLines, linesRead );
+            EXPECT_EQ( tExpectedElements, allDataRead.size() );
             if ( tExpectedElements ) {
                 size_t totalBytesReceived = allDataRead.size() * sizeof(element_t);
                 if (totalBytesReceived > expectedContentBytes) {
@@ -503,5 +505,243 @@ TEST_F( IOStreamBufferTest, readDataLineTest_CRLF_FilePosition ) {
 TEST_F( IOStreamBufferTest, readDataLineTest_CRLF_FilePosition_BinaryMode ) {
 
     iosbt_RunCRLFTest("rb");
+
+}
+
+TEST_F( IOStreamBufferTest, readDataLineTest_MixedLineEndings ) {
+
+    const char myData[] = {
+        "first_6789ABCDEF\n"
+        "second_789ABCDEF\r\n"
+        "third_6789ABCDEF\r"
+        "fourth_789ABCDEF\r"
+        "\r"
+    };
+    const char expectedData[] = {
+        "first_6789ABCDEF\n"
+        "second_789ABCDEF\n"
+        "third_6789ABCDEF\n"
+        "fourth_789ABCDEF\n"
+        "\n"
+    };
+    const unsigned lineCount = 5;
+    const unsigned lineLength = 16;
+    const unsigned myDataLength = (unsigned)strlen(myData);
+    const unsigned expectedDataLength = (unsigned)strlen(expectedData);
+
+    iosbt_RunReadDataLineTest<char>(myData, (size_t)myDataLength, 0,
+                                    { 1, lineLength - 1, lineLength, lineLength + 1, lineLength + 2, myDataLength * 2 },
+                                    { {   lineLength - 1,         0,                  0 },
+                                      {       lineLength,         0,                  0 },
+                                      {   lineLength + 1,         1,     lineLength + 1 },
+                                      { myDataLength * 2, lineCount, expectedDataLength } },
+                                    expectedData, expectedDataLength);
+
+}
+
+
+TEST_F( IOStreamBufferTest, readDataLineTest_Continuations_Ideal ) {
+
+    const char myData[] = {
+        "first_6789ABCDEF$\n"
+        "second_789ABCDEF\n"
+        "third_6789ABCDEF$\n"
+        "fourth_789ABCDEF\n"
+    };
+    const char expectedData[] = {
+        "first_6789ABCDEF"
+        "second_789ABCDEF\n"
+        "third_6789ABCDEF"
+        "fourth_789ABCDEF\n"
+    };
+    const unsigned lineLength = 32;
+    const unsigned lineCount = 2;
+    const unsigned myDataLength = (unsigned)strlen(myData);
+    const unsigned expectedDataLength = (unsigned)strlen(expectedData);
+
+    iosbt_RunReadDataLineTest<char>(myData, (size_t)myDataLength, '$',
+                                    { 1, lineLength - 1, lineLength, lineLength + 1, lineLength + 2, myDataLength * 2 },
+                                    { {   lineLength - 1,         0,                0 },
+                                      {       lineLength,         0,                0 },
+                                      {   lineLength + 1, lineCount, (lineLength + 1) * lineCount },
+                                      { myDataLength * 2, lineCount, (lineLength + 1) * lineCount } },
+                                    expectedData, (size_t)expectedDataLength);
+
+}
+
+TEST_F( IOStreamBufferTest, readDataLineTest_Continuations_TokensInData ) {
+
+    const char myData[] = {
+        "first$6789ABCDEF\n"
+        "second$$89ABCDEF\n"
+        "third$6$89ABCDEF\n"
+        "fourth$$8$ABCDEF\n"
+    };
+    const unsigned lineLength = 16;
+    const unsigned lineCount = 4;
+    const unsigned myDataLength = (unsigned)strlen(myData);
+
+    iosbt_RunReadDataLineTest<char>(myData, (size_t)myDataLength, '$',
+                                    { 1, lineLength - 1, lineLength, lineLength + 1, lineLength + 2, myDataLength * 2 },
+                                    { {   lineLength - 1,         0,                0 },
+                                      {       lineLength,         0,                0 },
+                                      {   lineLength + 1, lineCount, (lineLength + 1) * lineCount },
+                                      { myDataLength * 2, lineCount, (lineLength + 1) * lineCount } });
+
+}
+
+TEST_F( IOStreamBufferTest, readDataLineTest_Continuations_Consecutive ) {
+
+    const char myData[] = {
+        "first_6789ABCDEF$\n"
+        "second_789ABCDEF$\n"
+        "third_6789ABCDEF$\n"
+        "fourth_789ABCDEF\n"
+    };
+    const char expectedData[] = {
+        "first_6789ABCDEF"
+        "second_789ABCDEF"
+        "third_6789ABCDEF"
+        "fourth_789ABCDEF\n"
+    };
+    const unsigned lineLength = 64;
+    const unsigned lineCount = 1;
+    const unsigned myDataLength = (unsigned)strlen(myData);
+    const unsigned expectedDataLength = (unsigned)strlen(expectedData);
+
+    iosbt_RunReadDataLineTest<char>(myData, (size_t)myDataLength, '$',
+                                    { 1, lineLength - 1, lineLength, lineLength + 1, lineLength + 2, myDataLength * 2 },
+                                    { {   lineLength - 1,         0,                0 },
+                                      {       lineLength,         0,                0 },
+                                      {   lineLength + 1, lineCount, (lineLength + 1) * lineCount },
+                                      { myDataLength * 2, lineCount, (lineLength + 1) * lineCount } },
+                                    expectedData, (size_t)expectedDataLength);
+
+}
+
+TEST_F( IOStreamBufferTest, readDataLineTest_Continuations_EOF ) {
+
+    const char myData[] = {
+        "first_6789ABCDEF\n"
+        "second_789ABCDEF\n"
+        "third_6789ABCDEF\n"
+        "fourth_789ABCDEF$"
+    };
+    const char expectedContent[] = {
+        "first_6789ABCDEF\n"
+        "second_789ABCDEF\n"
+        "third_6789ABCDEF\n"
+        "fourth_789ABCDEF\n"
+    };
+    const unsigned lineLength = 16;
+    const unsigned lineCount = 4;
+    const unsigned myDataLength = (unsigned)strlen(myData);
+
+    iosbt_RunReadDataLineTest<char>(myData, (size_t)myDataLength, '$',
+                                    { 1, lineLength - 1, lineLength, lineLength + 1, lineLength + 2, myDataLength * 2 },
+                                    { {   lineLength - 1,         0,                0 },
+                                      {       lineLength,         0,                0 },
+                                      {   lineLength + 1, lineCount - 1, (lineLength + 1) * (lineCount - 1) },
+                                      {   lineLength + 2, lineCount, (lineLength + 1) * lineCount },
+                                      { myDataLength * 2, lineCount, (lineLength + 1) * lineCount } },
+                                    expectedContent, (size_t)strlen(expectedContent));
+
+}
+
+TEST_F( IOStreamBufferTest, readDataLineTest_Continuations_ConsecutiveEOF ) {
+
+    const char myData[] = {
+        "first_6789ABCDEF$\n"
+        "second_789ABCDEF$\n"
+        "third_6789ABCDEF$\n"
+        "fourth_789ABCDEF$"
+    };
+    const char expectedData[] = {
+        "first_6789ABCDEF"
+        "second_789ABCDEF"
+        "third_6789ABCDEF"
+        "fourth_789ABCDEF\n"
+    };
+    const unsigned lineLength = 64;
+    const unsigned lineCount = 1;
+    const unsigned myDataLength = (unsigned)strlen(myData);
+    const unsigned expectedDataLength = (unsigned)strlen(expectedData);
+
+    iosbt_RunReadDataLineTest<char>(myData, (size_t)myDataLength, '$',
+                                    { 1, lineLength - 1, lineLength, lineLength + 1, lineLength + 2, myDataLength * 2 },
+                                    { {   lineLength - 1,         0,                  0 },
+                                      {       lineLength,         0,                  0 },
+                                      {   lineLength + 1,         0,                  0 },
+                                      {   lineLength + 2, lineCount, expectedDataLength },
+                                      { myDataLength * 2, lineCount, expectedDataLength } },
+                                    expectedData, (size_t)expectedDataLength);
+
+}
+
+TEST_F( IOStreamBufferTest, readDataLineTest_Continuations_EmptyLines ) {
+
+    const char myData[] = {
+        "$\n"
+        "\n"
+        "$\n"
+        "$\n"
+        "\n"
+    };
+    const char expectedData[] = {
+        "\n"
+        "\n"
+    };
+    const unsigned lineLength = 0;
+    const unsigned lineCount = 2;
+    const unsigned myDataLength = (unsigned)strlen(myData);
+    const unsigned expectedDataLength = (unsigned)strlen(expectedData);
+
+    iosbt_RunReadDataLineTest<char>(myData, (size_t)myDataLength, '$',
+                                    { 1, 2, 3, myDataLength * 2 },
+                                    { {                1,         0,                            0 },
+                                      {                2, lineCount, (lineLength + 1) * lineCount },
+                                      { myDataLength * 2, lineCount, (lineLength + 1) * lineCount } },
+                                    expectedData, (size_t)expectedDataLength);
+
+}
+
+TEST_F( IOStreamBufferTest, readDataLineTest_Continuations_CRLF ) {
+
+    const char myData[] = {
+        "$\r\n"
+        "\r\n"
+        "$\r\n"
+        "$\r\n"
+        "\r\n"
+        "$\r\n"
+        "LINE\r\n"
+        "LINE$\r\n"
+        "\r\n"
+        "LINE$\r\n"
+        "LINE$\r\n"
+        "LINE\r\n"
+    };
+    const char expectedData[] = {
+        "\n"
+        "\n"
+        "LINE\n"
+        "LINE\n"
+        "LINELINELINE\n"
+    };
+    const unsigned lineCount = 5;
+    const unsigned myDataLength = (unsigned)strlen(myData);
+    const unsigned expectedDataLength = (unsigned)strlen(expectedData);
+
+    iosbt_RunReadDataLineTest<char>(myData, (size_t)myDataLength, '$',
+                                    { 1,2,3,4,5,6,7,8,9, myDataLength * 2 },
+                                    { {                1,         0,                  0 },
+                                      {                2,         0,                  0 },
+                                      {                3,         2,              1 + 1 },
+                                      {                5,         2,              1 + 1 },
+                                      {                6,         3,          1 + 1 + 5 },
+                                      {                7,         4,      1 + 1 + 5 + 5 },
+                                      {               14, lineCount, expectedDataLength },
+                                      { myDataLength * 2, lineCount, expectedDataLength } },
+                                    expectedData, (size_t)expectedDataLength);
 
 }
